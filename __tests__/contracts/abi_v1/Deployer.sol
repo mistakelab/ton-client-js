@@ -1,10 +1,10 @@
 pragma solidity >=0.5.0;
-pragma experimental ABIEncoderV1;
+pragma AbiHeader v1;
 pragma AbiHeader time;
 pragma AbiHeader expire;
 
 // Type TvmCell is only supported in the new experimental ABI encoder.
-pragma experimental ABIEncoderV1;
+pragma AbiHeader v1;
 
 contract ContractDeployer {
 	uint256 owner;	 // contract owner's address;

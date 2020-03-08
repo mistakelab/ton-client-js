@@ -1,8 +1,8 @@
 pragma solidity >=0.5.0;
-pragma experimental ABIEncoderV1;
+pragma AbiHeader v1;
 pragma AbiHeader time;
 pragma AbiHeader expire;
-pragma experimental ABIEncoderV1;
+pragma AbiHeader v1;
 
 contract SubscriptionContract {
 

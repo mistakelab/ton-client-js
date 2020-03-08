@@ -1,5 +1,5 @@
 pragma solidity >=0.5.0;
-pragma ABIEncoderV1;
+pragma AbiHeader v1;
 pragma AbiHeader time;
 pragma AbiHeader expire;
 
