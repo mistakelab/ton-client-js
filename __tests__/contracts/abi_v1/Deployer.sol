@@ -1,7 +1,10 @@
-pragma solidity ^0.5.0;
+pragma solidity >=0.5.0;
+pragma experimental ABIEncoderV1;
+pragma AbiHeader time;
+pragma AbiHeader expire;
 
 // Type TvmCell is only supported in the new experimental ABI encoder.
-pragma experimental ABIEncoderV2;
+pragma experimental ABIEncoderV1;
 
 contract ContractDeployer {
 	uint256 owner;	 // contract owner's address;
@@ -103,6 +106,4 @@ contract ContractDeployer {
 	function sendAllMoney(address payable dest_addr) public onlyOwner {
 		selfdestruct(dest_addr);
 	}
-
-	function() external payable {}
 }

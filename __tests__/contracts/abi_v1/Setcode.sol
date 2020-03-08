@@ -1,5 +1,7 @@
-pragma solidity ^0.5.0;
-pragma experimental ABIEncoderV2;
+pragma solidity >=0.5.0;
+pragma experimental ABIEncoderV1;
+pragma AbiHeader time;
+pragma AbiHeader expire;
 
 contract Setcode {
 
@@ -18,11 +20,6 @@ contract Setcode {
 	function getVersion() public pure returns (uint) {
         tvm.accept();
         return 1;
-    }
-    
-    function getNewVersion() public pure returns (uint) {
-        tvm.accept();
-        return 2;
     }
 
     function sendAllMoney(address payable dest_addr) public onlyOwner {
