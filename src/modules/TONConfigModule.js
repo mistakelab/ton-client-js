@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 TON DEV SOLUTIONS LTD.
+ * Copyright 2018-2020 TON DEV SOLUTIONS LTD.
  *
  * Licensed under the SOFTWARE EVALUATION License (the "License"); you may not use
  * this file except in compliance with the License.  You may obtain a copy of the
@@ -15,133 +15,211 @@
  */
 
 // @flow
+import type { TONConfigData } from "../../types";
+import type { TONModuleContext } from "../TONModule";
 import { TONModule } from '../TONModule';
+import { Tracer } from 'opentracing';
+import { tracer as noopTracer } from "opentracing/lib/noop";
 
-export type TONConfigData = {
-    defaultWorkchain: ?number,
-    servers: string[],
-    requestsServer?: string,
-    queriesServer?: string,
-    queriesWsServer?: string,
-    log_verbose?: boolean,
-}
+const MAX_MESSAGE_TIMEOUT = 5 * 60000;
+const DEFAULT_MESSAGE_RETRIES_COUNT = 10;
+const DEFAULT_MESSAGE_EXPIRATION_TIMEOUT = 10000;
+const DEFAULT_MESSAGE_EXPIRATION_GROW_FACTOR = 1.5;
+const DEFAULT_MESSAGE_PROCESSING_TIMEOUT = 40000;
+const DEFAULT_MESSAGE_PROCESSING_GROW_FACTOR = 1.5;
+const DEFAULT_WAIT_FOR_TIMEOUT = 40000;
 
-type URLParts = {
-    protocol: string,
-    host: string,
-    path: string,
-    query: string
-}
-
-function parseUrl(url: string): URLParts {
-    const protocolSeparatorPos = url.indexOf('://');
-    const protocolEnd = protocolSeparatorPos >= 0 ? protocolSeparatorPos + 3 : 0;
-    const questionPos = url.indexOf('?', protocolEnd);
-    const queryStart = questionPos >= 0 ? questionPos + 1 : url.length;
-    const pathEnd = questionPos >= 0 ? questionPos : url.length;
-    const pathSeparatorPos = url.indexOf('/', protocolEnd);
-    const pathStart = pathSeparatorPos >= 0
-        ? (pathSeparatorPos < pathEnd ? pathSeparatorPos : pathEnd)
-        : (questionPos >= 0 ? questionPos : url.length);
-    return {
-        protocol: url.substring(0, protocolEnd),
-        host: url.substring(protocolEnd, pathStart),
-        path: url.substring(pathStart, pathEnd),
-        query: url.substring(queryStart),
+export class URLParts {
+    static parse(url: string): URLParts {
+        const protocolSeparatorPos = url.indexOf('://');
+        const protocolEnd = protocolSeparatorPos >= 0 ? protocolSeparatorPos + 3 : 0;
+        const questionPos = url.indexOf('?', protocolEnd);
+        const queryStart = questionPos >= 0 ? questionPos + 1 : url.length;
+        const pathEnd = questionPos >= 0 ? questionPos : url.length;
+        const pathSeparatorPos = url.indexOf('/', protocolEnd);
+        // eslint-disable-next-line no-nested-ternary
+        const pathStart = pathSeparatorPos >= 0
+            ? (pathSeparatorPos < pathEnd ? pathSeparatorPos : pathEnd)
+            : (questionPos >= 0 ? questionPos : url.length);
+        return new URLParts(
+            url.substring(0, protocolEnd),
+            url.substring(protocolEnd, pathStart),
+            url.substring(pathStart, pathEnd),
+            url.substring(queryStart),
+        );
     }
-}
 
-function combineUrl(parts: URLParts): string {
-    let path = parts.path;
-    while (path.indexOf('//') >= 0) {
-        path = path.replace('//', '/');
+    static resolveUrl(baseUrl: string, url: string): string {
+        const baseParts = URLParts.parse(baseUrl);
+        return URLParts.parse(url)
+            .fixProtocol(x => x || baseParts.protocol)
+            .fixHost(x => x || baseParts.host)
+            .toString();
     }
-    if (path !== '' && !path.startsWith('/')) {
-        path = `/${path}`;
+
+    fixProtocol(fix: (p: string) => string): URLParts {
+        this.protocol = fix(this.protocol);
+        return this;
     }
-    return `${parts.protocol}${parts.host}${path}${parts.query !== '' ? '?' : ''}${parts.query}`;
-}
 
-function fixUrl(url, fixParts) {
-    let parts = parseUrl(url);
-    fixParts(parts);
-    return combineUrl(parts);
-}
+    fixHost(fix: (p: string) => string): URLParts {
+        this.host = fix(this.host);
+        return this;
+    }
+
+    fixPath(fix: (p: string) => string): URLParts {
+        this.path = fix(this.path);
+        return this;
+    }
+
+    fixQuery(fix: (q: string) => string): URLParts {
+        this.query = fix(this.query);
+        return this;
+    }
 
 
-function resolveServer(configured?: string, def: string): string {
-    return fixUrl(configured || def, (parts) => {
-        if (parts.protocol === '') {
-            parts.protocol = 'https://';
+    protocol: string;
+
+    host: string;
+
+    path: string;
+
+    query: string;
+
+    constructor(protocol: string, host: string, path: string, query: string) {
+        this.protocol = protocol;
+        this.host = host;
+        this.path = path;
+        this.query = query;
+    }
+
+
+    toString(): string {
+        let { path } = this;
+        while (path.indexOf('//') >= 0) {
+            path = path.replace('//', '/');
         }
-    });
+        if (path !== '' && !path.startsWith('/')) {
+            path = `/${path}`;
+        }
+        return `${this.protocol}${this.host}${path}${this.query !== '' ? '?' : ''}${this.query}`;
+    }
 }
 
-function replacePrefix(s, prefix, newPrefix) {
-    return `${newPrefix}${s.substr(prefix.length)}`;
+function resolveTimeout(
+    timeout?: number,
+    defaultTimeout: number,
+    growFactor?: number,
+    defaultGrowFactor: number,
+    retryIndex?: number,
+): number {
+    const resolvedTimeout = timeout === 0 ? 0 : (timeout || defaultTimeout);
+    const resolvedGrowFactor = growFactor || defaultGrowFactor;
+    return Math.min(
+        MAX_MESSAGE_TIMEOUT,
+        resolvedTimeout * Math.pow(resolvedGrowFactor, retryIndex || 0)
+    );
 }
 
-function appendPath(url, path) {
-    return fixUrl(url, (parts) => {
-        parts.path = `${parts.path}/${path}`;
-    });
-}
-
-const defaultServer = 'services.tonlabs.io';
+const defaultServer = 'http://localhost';
 
 export default class TONConfigModule extends TONModule {
-    data: ?TONConfigData;
+    data: TONConfigData;
+    tracer: Tracer;
 
+    constructor(context: TONModuleContext) {
+        super(context);
+        this.data = {
+            servers: [defaultServer],
+        }
+    }
 
     setData(data: TONConfigData) {
+        this.data = data || this.data;
+        if (this.data.servers.length === 0) {
+            this.data.servers.push(defaultServer);
+        }
+        this.tracer = data.tracer || noopTracer;
+    }
 
-        this.data = data || {
-            servers: [defaultServer],
-        };
-        let server = resolveServer(data.servers[0], defaultServer);
-        this._requestsUrl = resolveServer(data.requestsServer, appendPath(server, '/topics/requests'));
-        this._queriesHttpUrl = resolveServer(data.queriesServer, appendPath(server, '/graphql'));
-        const queriesWsServer = this._queriesHttpUrl.startsWith('https://')
-            ? replacePrefix(this._queriesHttpUrl, "https://", "wss://")
-            : replacePrefix(this._queriesHttpUrl, "http://", "ws://");
 
-        this._queriesWsUrl = resolveServer(data.queriesWsServer, queriesWsServer);
+    messageRetriesCount(): number {
+        return this.data.messageRetriesCount || DEFAULT_MESSAGE_RETRIES_COUNT;
+    }
+
+    messageExpirationTimeout(retryIndex?: number): number {
+        return resolveTimeout(
+            this.data.messageExpirationTimeout,
+            DEFAULT_MESSAGE_EXPIRATION_TIMEOUT,
+            this.data.messageExpirationTimeoutGrowFactor,
+            DEFAULT_MESSAGE_EXPIRATION_GROW_FACTOR,
+            retryIndex,
+        );
+    }
+
+    messageProcessingTimeout(retryIndex?: number): number {
+        return resolveTimeout(
+            this.data.messageProcessingTimeout,
+            DEFAULT_MESSAGE_PROCESSING_TIMEOUT,
+            this.data.messageProcessingTimeoutGrowFactor,
+            DEFAULT_MESSAGE_PROCESSING_GROW_FACTOR,
+            retryIndex,
+        );
+    }
+
+    waitForTimeout(): number {
+        return this.data.waitForTimeout || DEFAULT_WAIT_FOR_TIMEOUT;
     }
 
     log(...args: any[]) {
-        if (this._logVerbose) {
-            console.log(`[${Date.now()}]`, ...args);
+        const profile = (this._profileStart || 0) !== 0;
+        if (profile) {
+            const current = Date.now() / 1000;
+            const timeString = `${String(current.toFixed(3))} ${
+                String((current - this._profileStart).toFixed(3))} ${
+                String((current - this._profilePrev).toFixed(3))}`;
+            if (this._logVerbose) {
+                console.log(`[${timeString}]\n`, ...args);
+            } else {
+                console.log(`[${timeString}]\n`, args[0]);
+            }
+            this._profilePrev = current;
+        } else if (this._logVerbose) {
+            console.log(`[${Date.now() / 1000}]`, ...args);
         }
     }
 
-    requestsUrl(): string {
-        return this._requestsUrl;
+    startProfile() {
+        this._profileStart = Date.now() / 1000;
+        this._profilePrev = this._profileStart;
     }
 
-    queriesHttpUrl(): string {
-        return this._queriesHttpUrl;
-    }
-
-    queriesWsUrl(): string {
-        return this._queriesWsUrl;
+    stopProfile() {
+        this._profileStart = this._profilePrev = 0;
     }
 
     async getVersion(): Promise<string> {
-        return this.requestLibrary('version');
+        return this.requestCore('version');
     }
 
 
     async setup(): Promise<void> {
         if (this.data) {
-            await this.requestLibrary('setup', this.data);
+            const coreConfig = Object.assign({}, this.data);
+            delete coreConfig.tracer;
+            await this.requestCore('setup', coreConfig);
         }
-        this._logVerbose = (this.data && this.data.log_verbose) || false;
+        this._logVerbose = this.data.log_verbose || false;
+        if (this._logVerbose) {
+            this.startProfile();
+        }
     }
 
     _logVerbose: boolean;
-    _requestsUrl: string;
-    _queriesHttpUrl: string;
-    _queriesWsUrl: string;
+
+    _profileStart: number;
+
+    _profilePrev: number;
 }
 
 TONConfigModule.moduleName = 'TONConfigModule';

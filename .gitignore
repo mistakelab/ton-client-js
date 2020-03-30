@@ -8,5 +8,8 @@ node_modules/
 package-lock.json
 /__tests__/*.dylib
 /__tests__/*.node
-/__tests__/_/libtonclientnodejs.dylib
-/__tests__/_/tonclient.node
+/coverage/
+Jenkinsfile
+/reinstall.sh
+/uninstall.sh
+/.github/workflows/
